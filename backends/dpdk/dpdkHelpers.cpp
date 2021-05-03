@@ -337,18 +337,18 @@ bool ConvertStatementToDpdk::preorder(const IR::MethodCallStatement *s) {
             BUG("not implemented for `apply` other than table");
         }
     } else if (auto a = mi->to<P4::ExternMethod>()) {
-        // std::cerr << a->originalExternType->getName() << std::endl;
         // Checksum function call
         if (a->originalExternType->getName().name == "InternetChecksum") {
+            auto res =
+                csum_map->find(a->object->to<IR::Declaration_Instance>());
+            cstring intermediate;
+            if (res != csum_map->end()) {
+                intermediate = res->second;
+            } else {
+                BUG("checksum map does not collect all checksum def.");
+            }
+
             if (a->method->getName().name == "add") {
-                auto res =
-                    csum_map->find(a->object->to<IR::Declaration_Instance>());
-                cstring intermediate;
-                if (res != csum_map->end()) {
-                    intermediate = res->second;
-                } else {
-                    BUG("checksum map does not collect all checksum def.");
-                }
                 auto args = a->expr->arguments;
                 const IR::Argument *arg = args->at(0);
                 if (auto l = arg->expression->to<IR::ListExpression>()) {
@@ -360,17 +360,29 @@ bool ConvertStatementToDpdk::preorder(const IR::MethodCallStatement *s) {
                     ::error(
                         "The argument of InternetCheckSum.add is not a list.");
                 }
+            } else if (a->method->getName().name == "subtract") {
+                auto args = a->expr->arguments;
+                const IR::Argument *arg = args->at(0);
+                if (auto l = arg->expression->to<IR::ListExpression>()) {
+                    for (auto field : l->components) {
+                        add_instr(new IR::DpdkChecksumSubStatement(
+                            a->object->getName(), intermediate, field));
+                    }
+                } else {
+                    ::error(
+                        "The argument of InternetCheckSum.subtract is not a list.");
+                }
             }
         } else if (a->originalExternType->getName().name == "packet_out") {
             if (a->method->getName().name == "emit") {
                 auto args = a->expr->arguments;
                 auto header = args->at(0);
                 if (header->expression->is<IR::Member>() ||
-                    header->expression->is<IR::PathExpression>()) {
+                    header->expression->is<IR::PathExpression>() ||
+                    header->expression->is<IR::ArrayIndex>()) {
                     add_instr(new IR::DpdkEmitStatement(header->expression));
                 } else {
-                    ::error(
-                        "One emit does not like this packet.emit(header.xxx)");
+                    ::error(ErrorType::ERR_UNSUPPORTED, "%1% is not supported", s);
                 }
             }
         } else if (a->originalExternType->getName().name == "packet_in") {
@@ -378,11 +390,11 @@ bool ConvertStatementToDpdk::preorder(const IR::MethodCallStatement *s) {
                 auto args = a->expr->arguments;
                 auto header = args->at(0);
                 if (header->expression->is<IR::Member>() ||
-                    header->expression->is<IR::PathExpression>()) {
+                    header->expression->is<IR::PathExpression>() ||
+                    header->expression->is<IR::ArrayIndex>()) {
                     add_instr(new IR::DpdkExtractStatement(header->expression));
                 } else {
-                    ::error("Extract format does not like this "
-                            "packet.extract(header.xxx)");
+                    ::error(ErrorType::ERR_UNSUPPORTED, "%1% is not supported", s);
                 }
             }
         } else if (a->originalExternType->getName().name == "Meter") {

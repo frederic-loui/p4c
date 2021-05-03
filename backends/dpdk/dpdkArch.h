@@ -122,6 +122,8 @@ class CollectMetadataHeaderInfo : public Inspector {
 // This pass modifies all metadata references and header reference. For
 // metadata, struct_name.field_name -> m.struct_name_field_name. For header
 // headers.header_name.field_name -> h.header_name.field_name
+// The parameter named for header and metadata are also updated to "h" and
+// "m" respectively.
 class ReplaceMetadataHeaderName : public Transform {
     P4::ReferenceMap *refMap;
     CollectMetadataHeaderInfo *info;
@@ -130,8 +132,9 @@ class ReplaceMetadataHeaderName : public Transform {
     ReplaceMetadataHeaderName(P4::ReferenceMap *refMap,
                               CollectMetadataHeaderInfo *info)
         : refMap(refMap), info(info) {}
+    const IR::Node *preorder(IR::Type_Parser *p) override;
+    const IR::Node *preorder(IR::Type_Control *c) override;
     const IR::Node *preorder(IR::Member *m) override;
-    const IR::Node *preorder(IR::Parameter *p) override;
     const IR::Node *preorder(IR::PathExpression *pe) override;
 };
 
@@ -362,23 +365,22 @@ class PrependPDotToActionArgs : public Transform {
 // x. For dst = cksum.get(), it will be translated to mov dst state. This pass
 // collects checksum instances and index them.
 class CollectInternetChecksumInstance : public Inspector {
+    P4::TypeMap* typeMap;
     std::map<const IR::Declaration_Instance *, cstring> *csum_map;
     int index = 0;
 
   public:
     CollectInternetChecksumInstance(
+            P4::TypeMap *typeMap,
         std::map<const IR::Declaration_Instance *, cstring> *csum_map)
-        : csum_map(csum_map) {}
+        : typeMap(typeMap), csum_map(csum_map) {}
     bool preorder(const IR::Declaration_Instance *d) override {
-        if (d->type->is<IR::Type_Name>()) {
-            if (d->type->to<IR::Type_Name>()->path->name.name ==
-                "InternetChecksum") {
-                if (findContext<IR::P4Control>() or
-                    findContext<IR::P4Parser>()) {
-                    std::ostringstream s;
-                    s << "state_" << index++;
-                    csum_map->emplace(d, s.str());
-                }
+        auto type = typeMap->getType(d, true);
+        if (auto extn = type->to<IR::Type_Extern>()) {
+            if (extn->name == "InternetChecksum") {
+                std::ostringstream s;
+                s << "state_" << index++;
+                csum_map->emplace(d, s.str());
             }
         }
         return false;
@@ -434,8 +436,8 @@ class InjectInternetChecksumIntermediateValue : public Transform {
 class ConvertInternetChecksum : public PassManager {
   public:
     std::map<const IR::Declaration_Instance *, cstring> csum_map;
-    ConvertInternetChecksum(CollectMetadataHeaderInfo *info) {
-        passes.push_back(new CollectInternetChecksumInstance(&csum_map));
+    ConvertInternetChecksum(P4::TypeMap *typeMap, CollectMetadataHeaderInfo *info) {
+        passes.push_back(new CollectInternetChecksumInstance(typeMap, &csum_map));
         passes.push_back(
             new InjectInternetChecksumIntermediateValue(info, &csum_map));
     }
@@ -448,7 +450,6 @@ class ConvertInternetChecksum : public PassManager {
 class BreakLogicalExpressionParenthesis : public Transform {
   public:
     const IR::Node *postorder(IR::LAnd *land) {
-        std::cout << land << std::endl;
         if (auto land2 = land->left->to<IR::LAnd>()) {
             auto sub = new IR::LAnd(land2->right, land->right);
             return new IR::LAnd(land2->left, sub);
@@ -465,7 +466,6 @@ class BreakLogicalExpressionParenthesis : public Transform {
         return land;
     }
     const IR::Node *postorder(IR::LOr *lor) {
-        std::cout << lor << std::endl;
         if (auto lor2 = lor->left->to<IR::LOr>()) {
             auto sub = new IR::LOr(lor2->right, lor->right);
             return new IR::LOr(lor2->left, sub);
@@ -591,7 +591,7 @@ class RewriteToDpdkArch : public PassManager {
         }));
         passes.push_back(new CollectLocalVariableToMetadata(
             &parsePsa->toBlockInfo, info, refMap));
-        auto checksum_convertor = new ConvertInternetChecksum(info);
+        auto checksum_convertor = new ConvertInternetChecksum(typeMap, info);
         passes.push_back(checksum_convertor);
         csum_map = &checksum_convertor->csum_map;
         auto p = new PrependPDotToActionArgs(&parsePsa->toBlockInfo, refMap);
